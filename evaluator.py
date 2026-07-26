@@ -6,20 +6,23 @@ import os
 import json
 import glob
 import math
+import random
 import statistics
-from typing import Dict, List
+from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from tqdm import tqdm
 from datetime import datetime
 from openai import OpenAI
+import httpx as _httpx
 
-from POHF_parameters import API_CONFIG
+from IDS_TAP_parameters import API_CONFIG
 
 
 RESULTS_BASE_DIR = "./final_re"
 PERSONA_RESULTS_DIR = "./persona_results"
 FINAL_SU_DIR = "./final_su"
+REPHASE_DATA_DIR = "./rephase_data"
 
 
 _history_context_cache: Dict[str, Dict[int, Dict[int, List[str]]]] = {}
@@ -28,6 +31,11 @@ _history_context_cache_lock = Lock()
 
 _original_summary_cache: Dict[str, Dict[int, str]] = {}
 _original_summary_cache_lock = Lock()
+
+
+# Cache for 100 rephased personas per (dataset, counter) loaded from rephase_data/
+_rephase_summaries_cache: Dict[str, Dict[int, List[str]]] = {}
+_rephase_summaries_cache_lock = Lock()
 
 
 def _load_history_contexts(dataset_name: str) -> Dict[int, Dict[int, List[str]]]:
@@ -94,6 +102,39 @@ def _get_original_summary(dataset_name: str, counter: int) -> str:
         return _original_summary_cache[dataset_name].get(counter, '')
 
 
+def _load_rephase_summaries_for_dataset(dataset_name: str) -> Dict[int, List[str]]:
+    """从 rephase_data/ 加载该数据集所有 counter 的 100 个重写 persona 列表。
+
+    文件命名规则: {dataset}_times100_{counter+1}_counter{counter}.json
+    """
+    pattern = os.path.join(REPHASE_DATA_DIR, f"{dataset_name}_times100_*_counter*.json")
+    files = glob.glob(pattern)
+    result: Dict[int, List[str]] = {}
+    for filepath in files:
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            counter = data.get('counter')
+            summaries = data.get('summaries', [])
+            if counter is not None and summaries:
+                result[int(counter)] = summaries
+        except Exception as e:
+            print(f"⚠️ Error loading rephase file {filepath}: {e}")
+    return result
+
+
+def _get_random_persona_summary(dataset_name: str, counter: int) -> Optional[str]:
+    """随机返回当前用户 100 个 persona 中的一个，用于 baseline 注入。"""
+    global _rephase_summaries_cache
+    with _rephase_summaries_cache_lock:
+        if dataset_name not in _rephase_summaries_cache:
+            _rephase_summaries_cache[dataset_name] = _load_rephase_summaries_for_dataset(dataset_name)
+        summaries = _rephase_summaries_cache[dataset_name].get(counter, [])
+    if summaries:
+        return random.choice(summaries)
+    return None
+
+
 MAX_WORKERS = 20
 NUM_REPEATS = 3
 PRINT_NAIVE_RESPONSE = True
@@ -115,7 +156,12 @@ SYSTEM_ROLE_COMPARISON = "You are an expert evaluator. Your task is to compare t
 
 
 def get_llm_client():
-    return OpenAI(api_key=API_CONFIG.get("openai_api_key"), base_url=API_CONFIG.get("openai_base_url"))
+    _proxy = os.environ.get("https_proxy") or os.environ.get("http_proxy")
+    return OpenAI(
+        api_key=API_CONFIG.get("openai_api_key"),
+        base_url=API_CONFIG.get("openai_base_url"),
+        http_client=_httpx.Client(proxy=_proxy) if _proxy else None,
+    )
 
 
 def call_llm(prompt: str, max_retries: int = 5, system_role: str = None) -> str:
@@ -217,29 +263,31 @@ def aggregate_repeated_results(all_run_results: List[Dict[str, Dict]]) -> Dict[s
 def generate_naive_response_for_persona(query_text: str, dataset_name: str, counter: int, query_index: int) -> str:
     """生成带有 history_context 的 naive response。
 
-    ultrachat/wildchat: 使用完整历史数据，预测用户下一个问题
-    prefeval: 使用完整交互记录，根据 query 预测用户偏好
-    其他数据集 (lamp4, lamp5, lamp8, lamp9, lamp10): 使用简化的 prompt
+    ultrachat/wildchat: 使用完整历史数据（无 persona 注入），预测下一个问题
+    prefeval:           使用完整交互记录，根据 query 预测用户偏好
+    lamp4/lamp5:        使用历史文章-标题对作为 few-shot 示例，生成个性化标题
+    lamp8/lamp9/lamp10: 使用 original_summary (用户 persona 摘要) 生成对应内容
+    其他:               若有历史则拼入 prompt，否则用纯 instruction
     """
     history_list = _get_history_context(dataset_name, counter, query_index)
     instruction = LAMP_INSTRUCTIONS.get(dataset_name, "")
 
     if dataset_name in ["ultrachat", "wildchat"]:
         if history_list:
-            history_text = "\n\n".join(history_list)  
-            prompt = f"""You are a personalization assistant. Based on the user's conversation history below, predict the next question that the user would ask.
+            history_text = "\n\n".join(history_list)
+            prompt = f"""You are a personalization assistant. Based on the user's conversation history below, predict the user's next message in the conversation.
 
 === User's Conversation History ===
 {history_text}
 
 === Task ===
-Based on the conversation history above, predict the next question that the user would ask. Your prediction should reflect the user's interests, communication style, and the natural flow of the conversation.
+Based on the conversation history above, predict the user's next message. Your prediction should reflect the user's interests, communication style, emotional tone, and the natural flow of the conversation. The next message may be a question, a statement, a reaction, or a combination.
 
-Provide only the predicted question, without any explanations."""
+Provide only the predicted message, without any explanations."""
         else:
-            prompt = """Based on the context, predict the next question that the user would ask.
+            prompt = """Based on the context, predict the user's next message in the conversation.
 
-Provide only the predicted question, without any explanations."""
+Provide only the predicted message, without any explanations."""
 
     elif dataset_name == "prefeval":
         if history_list:
@@ -329,16 +377,41 @@ Provide only the post content, without any explanations or meta-commentary."""
 
 Please provide only the post content, without including any additional information or explanations."""
 
+    elif dataset_name in ["lamp4", "lamp5"]:
+        if history_list:
+            history_text = "\n\n---\n\n".join(history_list)
+            prompt = f"""You are a personalization assistant. The user has a specific writing style and content preference for generating titles/headlines, as shown in their history below.
+
+=== User's History (past article-headline pairs) ===
+{history_text}
+
+=== Task ===
+{instruction}
+
+{query_text}
+
+Based on the user's history above, generate a headline that matches their personal style and preferences. Provide only the headline, without any explanations."""
+        else:
+            prompt = f"""{instruction}
+
+{query_text}
+
+Please provide only the headline, without including any additional information or explanations."""
+
     else:
         if history_list:
+            history_text = "\n\n".join(history_list)
             prompt = f"""You are a personalization assistant. You MUST carefully analyze the user's interest and generate a response that matches their content preferences and writing style.
+
+=== User's History ===
+{history_text}
 
 Task: {instruction}
 
 Query:
 {query_text}
 
-IMPORTANT: Your response MUST reflect the content preferences and stylistic patterns."""
+IMPORTANT: Your response MUST reflect the content preferences and stylistic patterns shown in the history above."""
         else:
             prompt = f"""{instruction}
 
@@ -497,6 +570,8 @@ def main_persona_evaluation():
     parser = argparse.ArgumentParser(description='Persona Results Evaluator (LLM as Judge)')
     parser.add_argument('--data_dir', type=str, default=PERSONA_RESULTS_DIR)
     parser.add_argument('--output_dir', type=str, default=os.path.join(RESULTS_BASE_DIR, "persona_llm_judge"))
+    parser.add_argument('--datasets', type=str, default=None,
+                        help='逗号分隔的数据集名称，例如 ultrachat,lamp4。默认评估全部。')
     args = parser.parse_args()
 
     num_repeats = EVAL_REPEAT_CONFIG.get("num_repeats", 3)
@@ -507,6 +582,15 @@ def main_persona_evaluation():
     if not datasets:
         print("❌ No data files found.")
         return
+
+    # 按需过滤数据集
+    if args.datasets:
+        requested = [d.strip() for d in args.datasets.split(',') if d.strip()]
+        datasets = {k: v for k, v in datasets.items() if k in requested}
+        if not datasets:
+            print(f"❌ 指定的数据集 {requested} 未在 {args.data_dir} 中找到。")
+            return
+        print(f"📌 仅评估数据集: {list(datasets.keys())}")
     os.makedirs(args.output_dir, exist_ok=True)
 
     all_aggregated_results = {}

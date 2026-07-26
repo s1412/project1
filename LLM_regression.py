@@ -9,10 +9,10 @@ import os
 from typing import List, Tuple, Optional
 
 try:
-    from POHF import Network
+    from ID_TAP import Network
     from backpack import extend
 except ImportError:
-    print("Warning: Could not import Network from POHF or backpack")
+    print("Warning: Could not import Network from ID_TAP or backpack")
     Network = None
 
 def is_lamp_dataset(lamp_type: int = None) -> bool:
@@ -23,7 +23,7 @@ def is_lamp_dataset(lamp_type: int = None) -> bool:
 
 def get_input_dim_for_dataset(lamp_type: int = None, config: dict = None) -> int:
     try:
-        from IDS_TAP_parameters.py import CONTEXTUAL_BANDIT_CONFIG
+        from IDS_TAP_parameters import CONTEXTUAL_BANDIT_CONFIG
         contextual_enabled = CONTEXTUAL_BANDIT_CONFIG.get("enabled_for_lamp", True)
         contextual_dim = CONTEXTUAL_BANDIT_CONFIG.get("contextual_input_dim", 2048)
         standard_dim = CONTEXTUAL_BANDIT_CONFIG.get("standard_input_dim", 1024)
@@ -40,7 +40,7 @@ def get_input_dim_for_dataset(lamp_type: int = None, config: dict = None) -> int
 class Random:
 
     def __init__(self, input_dim, config=None):
-        from IDS_TAP_parameters.py import EXPERIMENT_CONFIG, DATA_CONFIG
+        from IDS_TAP_parameters import EXPERIMENT_CONFIG, DATA_CONFIG
 
         self.total_iter = EXPERIMENT_CONFIG.get("total_iter", 100)
         self.n_init = EXPERIMENT_CONFIG.get("n_init", 10)
@@ -74,7 +74,7 @@ class LinearModel(nn.Module):
         super(LinearModel, self).__init__()
 
         try:
-            from IDS_TAP_parameters.py import NETWORK_CONFIG
+            from IDS_TAP_parameters import NETWORK_CONFIG
             default_hidden_size = NETWORK_CONFIG.get("hidden_size", 1024)
             default_depth = NETWORK_CONFIG.get("depth", 1)
             default_dropout_rate = NETWORK_CONFIG.get("dropout_rate", 0.1)
@@ -124,7 +124,7 @@ class LinearDuelingBandits:
 
     def __init__(self, input_dim, config=None):
         if config is None:
-            from IDS_TAP_parameters.py import NETWORK_CONFIG, TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG
+            from IDS_TAP_parameters import NETWORK_CONFIG, TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG
             network_config = NETWORK_CONFIG.copy()
             training_config = TRAINING_CONFIG
             device_config = DEVICE_CONFIG
@@ -301,7 +301,7 @@ class ENN(nn.Module):
         super(ENN, self).__init__()
 
         try:
-            from IDS_TAP_parameters.py import NETWORK_CONFIG, DOUBLETS_CONFIG
+            from IDS_TAP_parameters import NETWORK_CONFIG, DOUBLETS_CONFIG
             doublets_network = DOUBLETS_CONFIG.get("network", {})
 
             default_hidden_size = doublets_network.get("hidden_size") or NETWORK_CONFIG.get("hidden_size", 1024)
@@ -391,7 +391,7 @@ class POHFRandomPair:
 
     def __init__(self, input_dim, config=None):
         if config is None:
-            from IDS_TAP_parameters.py import NETWORK_CONFIG, TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG, POHF_CONFIG
+            from IDS_TAP_parameters import NETWORK_CONFIG, TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG, POHF_CONFIG
             network_config = NETWORK_CONFIG.copy()
             training_config = TRAINING_CONFIG
             device_config = DEVICE_CONFIG
@@ -420,7 +420,7 @@ class POHFRandomPair:
         self.lamb = pohf_config.get("lambda", 1.0)
         self.nu = pohf_config.get("nu", 0.2)
 
-        from POHF import Network
+        from ID_TAP import Network
         from backpack import extend
         self.func = extend(Network(self.input_dim, config=network_config)).to(self.device)
 
@@ -553,7 +553,7 @@ class POHFRandomPair:
 
     def calculate_scores_only(self, items):
         try:
-            from IDS_TAP_parameters.py import POHF_CONFIG
+            from IDS_TAP_parameters import POHF_CONFIG
             temperature = POHF_CONFIG.get("softmax_temperature", 1.0)
         except ImportError:
             temperature = 1.0
@@ -581,7 +581,7 @@ class POHFRandomPair:
         self.optimizer = self.optimizer_fn(self.func.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
     def _reset_optimizer_only(self):
-        from IDS_TAP_parameters.py import TRAINING_CONFIG
+        from IDS_TAP_parameters import TRAINING_CONFIG
 
         self.optimizer = self.optimizer_fn(self.func.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
@@ -612,7 +612,7 @@ class POHFRandomPair:
         self.func.train()
         self.func.to(self.device)
 
-        from IDS_TAP_parameters.py import TRAINING_CONFIG
+        from IDS_TAP_parameters import TRAINING_CONFIG
         batch_size = TRAINING_CONFIG.get("batch_size", 4)
         gradient_clip_norm = TRAINING_CONFIG.get("gradient_clip_norm", 1.0)
 
@@ -671,7 +671,7 @@ class POHFRandom:
 
     def __init__(self, input_dim, config=None):
         if config is None:
-            from IDS_TAP_parameters.py import NETWORK_CONFIG, TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG, POHF_CONFIG
+            from IDS_TAP_parameters import NETWORK_CONFIG, TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG, POHF_CONFIG
             network_config = NETWORK_CONFIG.copy()
             training_config = TRAINING_CONFIG
             device_config = DEVICE_CONFIG
@@ -700,7 +700,7 @@ class POHFRandom:
         self.lamb = pohf_config.get("lambda", 1.0)
         self.nu = pohf_config.get("nu", 0.2)
 
-        from POHF import Network
+        from ID_TAP import Network
         from backpack import extend
         self.func = extend(Network(self.input_dim, config=network_config)).to(self.device)
 
@@ -762,7 +762,7 @@ class POHFRandom:
 
     def calculate_scores_only(self, items):
         try:
-            from IDS_TAP_parameters.py import POHF_CONFIG
+            from IDS_TAP_parameters import POHF_CONFIG
             temperature = POHF_CONFIG.get("softmax_temperature", 1.0)
         except ImportError:
             temperature = 1.0
@@ -784,7 +784,7 @@ class POHFRandom:
     def restart_model(self, N):
         self.func.load_state_dict(copy.deepcopy(self.init_model_weight))
 
-        from IDS_TAP_parameters.py import TRAINING_CONFIG
+        from IDS_TAP_parameters import TRAINING_CONFIG
         fixed_weight_decay = self.weight_decay
 
         self.optimizer = self.optimizer_fn(
@@ -810,7 +810,7 @@ class POHFRandom:
             )
 
     def _reset_optimizer_only(self):
-        from IDS_TAP_parameters.py import TRAINING_CONFIG
+        from IDS_TAP_parameters import TRAINING_CONFIG
         self.optimizer = self.optimizer_fn(self.func.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         min_lr_ratio = TRAINING_CONFIG.get("min_lr_ratio", 0.1)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -839,7 +839,7 @@ class POHFRandom:
         self.func.train()
         self.func.to(self.device)
 
-        from IDS_TAP_parameters.py import TRAINING_CONFIG
+        from IDS_TAP_parameters import TRAINING_CONFIG
         batch_size = TRAINING_CONFIG.get("batch_size", 32)
         gradient_clip_norm = TRAINING_CONFIG.get("gradient_clip_norm", 1.0)
 
@@ -903,7 +903,7 @@ class DoubleTS:
 
     def __init__(self, input_dim, config=None):
         if config is None:
-            from IDS_TAP_parameters.py import NETWORK_CONFIG, TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG, DOUBLETS_CONFIG
+            from IDS_TAP_parameters import NETWORK_CONFIG, TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG, DOUBLETS_CONFIG
             network_config = NETWORK_CONFIG.copy()
             training_config = TRAINING_CONFIG
             device_config = DEVICE_CONFIG
@@ -1041,7 +1041,7 @@ class DoubleTS:
         else:
             self.restart_model()
 
-        from IDS_TAP_parameters.py import TRAINING_CONFIG
+        from IDS_TAP_parameters import TRAINING_CONFIG
         batch_size = TRAINING_CONFIG.get("batch_size", 8)
         gradient_clip_norm = TRAINING_CONFIG.get("gradient_clip_norm", 100.0)
 
@@ -1121,7 +1121,7 @@ class LinearInfoGain:
 
     def __init__(self, input_dim, config=None):
         if config is None:
-            from IDS_TAP_parameters.py import TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG, POHF_CONFIG
+            from IDS_TAP_parameters import TRAINING_CONFIG, DEVICE_CONFIG, DATA_CONFIG, POHF_CONFIG
             training_config = TRAINING_CONFIG
             device_config = DEVICE_CONFIG
             data_config = DATA_CONFIG
@@ -1170,7 +1170,7 @@ class LinearInfoGain:
 
     def calculate_scores_only(self, items):
         try:
-            from IDS_TAP_parameters.py import POHF_CONFIG
+            from IDS_TAP_parameters import POHF_CONFIG
             temperature = POHF_CONFIG.get("softmax_temperature", 1.0)
         except ImportError:
             temperature = 1.0
@@ -1197,7 +1197,7 @@ class LinearInfoGain:
             self.func.load_state_dict(copy.deepcopy(self._query_start_weights))
 
     def _reset_optimizer(self):
-        from IDS_TAP_parameters.py import TRAINING_CONFIG
+        from IDS_TAP_parameters import TRAINING_CONFIG
         min_lr_ratio = TRAINING_CONFIG.get("min_lr_ratio", 0.01)
 
         self.optimizer = self.optimizer_fn(
@@ -1221,7 +1221,7 @@ class LinearInfoGain:
         self._reset_optimizer()
         self.func.train()
 
-        from IDS_TAP_parameters.py import TRAINING_CONFIG
+        from IDS_TAP_parameters import TRAINING_CONFIG
         batch_size = TRAINING_CONFIG.get("batch_size", 32)
         gradient_clip_norm = TRAINING_CONFIG.get("gradient_clip_norm", 1.0)
         early_stopping = TRAINING_CONFIG.get("early_stopping", False)
@@ -1295,7 +1295,7 @@ def create_algorithm(algorithm_name: str, input_dim: int = None, config=None):
         raise ValueError(f"Unknown algorithm: {algorithm_name}. Available: {list(algorithms.keys())}")
 
     if input_dim is None and algorithm_name != "Random":
-        from IDS_TAP_parameters.py import DATA_CONFIG
+        from IDS_TAP_parameters import DATA_CONFIG
         input_dim = DATA_CONFIG.get("embedding_max_dim", 1024)
         print(f"🔧 for{algorithm_name}UsingPOHFconfigurationembedding dimension: {input_dim}")
 

@@ -1,4 +1,5 @@
 import json
+import os
 from openai import OpenAI
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -8,7 +9,7 @@ from scipy.spatial.distance import cosine
 
 
 try:
-    from IDS_TAP_parameters.py import DATA_CONFIG
+    from IDS_TAP_parameters import DATA_CONFIG
     LAMP_PROFILE_THRESHOLD_SMALL = DATA_CONFIG.get("lamp_profile_threshold_small", 10)
     LAMP_PROFILE_THRESHOLD_LARGE = DATA_CONFIG.get("lamp_profile_threshold_large", 20)
     LAMP_HISTORY_CONTEXT_COUNT_SMALL = DATA_CONFIG.get("lamp_history_context_count_small", 5)
@@ -25,11 +26,14 @@ except ImportError:
     LAMP_TOTAL_IO_COUNT = 10
 
 client = OpenAI(
-    api_key="YOUR_API_KEY_HERE",
-    base_url="YOUR_OPENAI_BASE_URL"
+    api_key=os.environ.get("OPENROUTER_API_KEY", "API_KEY_NOT_SET"),
+    base_url="https://openrouter.ai/api/v1"
 )
 
 def load_templated_data(input_address, output_address, LaMP_type, max_len, method, times, counter, max_history_items=20):
+
+    from IDS_TAP_parameters import DATA_CONFIG as _LTD_DC
+    domain_gen_method = _LTD_DC.get("domain_generation_method", "rephrase")
 
     input_item, output = _load_single_user_data(input_address, output_address, LaMP_type, counter)
 
@@ -52,7 +56,8 @@ def load_templated_data(input_address, output_address, LaMP_type, max_len, metho
         synthesis = Synthesis_multiturn(history_context, LaMP_type)
 
         single_instruction, allVersions_summary = domain_generation(
-            instruction, summary, times, LaMP_type, input_id, counter, ranked_entries
+            instruction, summary, times, LaMP_type, input_id, counter, ranked_entries,
+            method=domain_gen_method
         )
 
         templated_input = [input_id, query, single_instruction, allVersions_summary, synthesis, ranked_entries]
@@ -93,7 +98,8 @@ def load_templated_data(input_address, output_address, LaMP_type, max_len, metho
     first_ranked_entries = ranked_entries_list[0] if ranked_entries_list else []
 
     single_instruction, allVersions_summary = domain_generation(
-        instruction, summary, times, LaMP_type, input_id, counter, first_ranked_entries
+        instruction, summary, times, LaMP_type, input_id, counter, first_ranked_entries,
+        method=domain_gen_method
     )
 
 
@@ -508,6 +514,270 @@ def Synthesis_lamp(history_context, LaMP_type):
     return ""
 
 
+# ============================================================
+# Keyword-based domain generation helpers
+# ============================================================
+
+def extract_keywords_from_context(history_context, lamp_type, n_keywords_min=10, n_keywords_max=15):
+    """
+    Extract N keywords from history_context using LLM.
+    N is chosen adaptively based on the word count of the history:
+      < 500 words  -> n_keywords_min  (e.g. 10)
+      500-1500 words -> midpoint       (e.g. 12)
+      > 1500 words -> n_keywords_max  (e.g. 15)
+
+    Falls back to simple word-frequency extraction if the API fails.
+
+    Args:
+        history_context: list of conversation turns (multiturn) or profile dicts (LaMP)
+        lamp_type: dataset type identifier
+        n_keywords_min: minimum number of keywords (for short texts)
+        n_keywords_max: maximum number of keywords (for long texts)
+
+    Returns:
+        List[str]: deduplicated keyword list
+    """
+    import time
+    import random
+    import re
+    from collections import Counter
+
+    # ---------- format history text ----------
+    if lamp_type in [0, -1, -2]:
+        entries = [f"Turn {i+1}: {str(turn)}" for i, turn in enumerate(history_context[:20])]
+    else:
+        entries = [f"Entry {i+1}: {str(entry)}" for i, entry in enumerate(history_context[:20])]
+    history_text = "\n".join(entries)
+
+    # ---------- adaptive keyword count ----------
+    word_count = len(history_text.split())
+    if word_count < 500:
+        n_keywords = n_keywords_min
+    elif word_count < 1500:
+        n_keywords = (n_keywords_min + n_keywords_max) // 2
+    else:
+        n_keywords = n_keywords_max
+
+    print(f"   🔑 [extract_keywords] word_count={word_count}, target n_keywords={n_keywords}")
+
+    # Truncate if extremely long
+    MAX_HISTORY_CHARS = 8000
+    if len(history_text) > MAX_HISTORY_CHARS:
+        history_text = history_text[:MAX_HISTORY_CHARS] + "\n\n... [truncated] ..."
+
+    prompt = (
+        f"Based on the user history below, extract exactly {n_keywords} keywords or short phrases "
+        f"(1-3 words each) that best represent this user's unique interests, topics, and identity anchors.\n\n"
+        f"### User History:\n{history_text}\n\n"
+        f"### Requirements:\n"
+        f"- Extract EXACTLY {n_keywords} keywords or short phrases\n"
+        f"- Order by importance (most distinctive first)\n"
+        f"- Prefer SPECIFIC over GENERIC terms\n"
+        f"- Avoid stopwords or overly vague terms like 'things', 'various', 'general'\n\n"
+        f"Output format: ONLY a comma-separated list of {n_keywords} items. No numbering, no explanations.\n\n"
+        f"Keywords:"
+    )
+
+    system_prompt = (
+        "You are a keyword extraction specialist for user profiling. "
+        "Extract the most distinctive and specific keywords from user history. "
+        "Return ONLY comma-separated keywords or short phrases. No other text."
+    )
+
+    max_retries = 5
+    base_delay = 2.0
+
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="deepseek/deepseek-v3.2",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                timeout=30.0
+            )
+
+            if not response or not response.choices:
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt) + random.uniform(0, 2))
+                    continue
+                break
+
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt) + random.uniform(0, 2))
+                    continue
+                break
+
+            # Parse and deduplicate
+            raw_keywords = [kw.strip() for kw in content.strip().split(',') if kw.strip()]
+            seen = set()
+            unique_keywords = []
+            for kw in raw_keywords:
+                if kw.lower() not in seen:
+                    seen.add(kw.lower())
+                    unique_keywords.append(kw)
+
+            if len(unique_keywords) >= n_keywords_min:
+                result = unique_keywords[:n_keywords]
+                print(f"   ✅ [extract_keywords] Got {len(result)} keywords: {result}")
+                return result
+            elif unique_keywords:
+                print(f"   ⚠️ [extract_keywords] Only got {len(unique_keywords)} keywords, returning as-is")
+                return unique_keywords
+
+            if attempt < max_retries - 1:
+                time.sleep(base_delay * (2 ** attempt) + random.uniform(0, 2))
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+                print(f"⚠️ [extract_keywords] API error ({e}), retrying in {delay:.1f}s ({attempt+1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"⚠️ [extract_keywords] API failed after {max_retries} attempts, using fallback")
+
+    # ---------- fallback: simple word-frequency extraction ----------
+    print(f"   🔄 [extract_keywords] Using TF-IDF fallback")
+    combined_text = history_text.lower()
+    words = re.findall(r'\b[a-zA-Z]{4,}\b', combined_text)
+    stop_words = {
+        'this', 'that', 'with', 'have', 'from', 'they', 'been', 'were', 'will',
+        'what', 'when', 'where', 'which', 'their', 'there', 'about', 'would',
+        'could', 'should', 'these', 'those', 'some', 'than', 'then', 'also',
+        'into', 'over', 'after', 'more', 'very', 'just', 'like', 'other',
+        'through', 'such', 'user', 'users', 'data', 'text', 'generate', 'based'
+    }
+    filtered = [w for w in words if w not in stop_words]
+    top_keywords = [w for w, _ in Counter(filtered).most_common(n_keywords_min)]
+    print(f"   🔄 [extract_keywords] Fallback keywords: {top_keywords}")
+    return top_keywords
+
+
+def get_persona_with_keyword_emphasis(summary, history_context, keywords_combo,
+                                      max_length=None, lamp_type=None):
+    """
+    Generate a persona summary grounded in history_context that places particular
+    emphasis on the given keywords_combo (a list of 2-3 keyword strings).
+
+    Args:
+        summary: base persona summary (str)
+        history_context: user history as a list
+        keywords_combo: list of 2-3 keywords/phrases to emphasize
+        max_length: optional max character length for output
+        lamp_type: dataset type identifier
+
+    Returns:
+        str: persona description emphasizing the given keywords
+    """
+    import time
+    import random
+
+    # Format history context (limit to first 10 entries to keep prompt concise)
+    if lamp_type in [0, -1, -2]:
+        entries = [f"Turn {i+1}: {str(turn)}" for i, turn in enumerate(history_context[:10])]
+    else:
+        entries = [f"Entry {i+1}: {str(entry)}" for i, entry in enumerate(history_context[:10])]
+    history_str = "\n".join(entries)
+
+    MAX_HISTORY_CHARS = 6000
+    if len(history_str) > MAX_HISTORY_CHARS:
+        history_str = history_str[:MAX_HISTORY_CHARS] + "\n... [truncated] ..."
+
+    keywords_str = ", ".join([f'"{kw}"' for kw in keywords_combo])
+
+    if max_length:
+        length_constraint = f"- Keep output under {max_length} characters.\n"
+    else:
+        length_constraint = "- Keep output similar in length to the base summary.\n"
+
+    system_content = (
+        "You are a persona generation expert. Your task is to generate a user persona summary "
+        "grounded in the user's actual history, while particularly emphasizing certain specified "
+        "themes or topics. The persona should feel natural and coherent, not forced."
+    )
+
+    user_content = (
+        f"Below is a user's history context and their base persona summary. "
+        f"Generate a new persona summary that is aware of the full history, "
+        f"but places particular emphasis on the following themes: {keywords_str}.\n\n"
+        f"### User History Context:\n{history_str}\n\n"
+        f"### Base Persona Summary:\n{summary}\n\n"
+        f"### Requirements:\n"
+        f"- Write in third-person perspective\n"
+        f"- Naturally highlight aspects related to: {keywords_str}\n"
+        f"- Stay grounded in actual user history (do not fabricate details)\n"
+        f"- Maintain coherence with the base persona\n"
+        f"{length_constraint}"
+        f"- Output ONLY the persona description, no other text:"
+    )
+
+    max_retries = 5
+    base_delay = 2.0
+
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="deepseek/deepseek-v3.2",
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content}
+                ],
+                temperature=0.5,
+                top_p=1.0,
+                timeout=30.0,
+                presence_penalty=0.3,
+                frequency_penalty=0.3,
+            )
+
+            if not response or not response.choices:
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt) + random.uniform(0, 1))
+                    continue
+                raise Exception("keyword_persona API: no response")
+
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt) + random.uniform(0, 1))
+                    continue
+                raise Exception("keyword_persona API: empty content")
+
+            result = content.strip()
+            if max_length and len(result) > max_length:
+                result = result[:max_length - 3] + "..."
+            return result
+
+        except Exception as e:
+            if "content_filter" in str(e) or "ResponsibleAIPolicyViolation" in str(e):
+                return summary
+            elif "rate_limit" in str(e).lower() or "429" in str(e):
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+                    print(f"⚠️ [keyword_persona] Rate limit, retrying in {delay:.1f}s")
+                    time.sleep(delay)
+                    continue
+                return summary
+            elif any(err in str(e).lower() for err in ["connection", "timeout", "network", "unreachable"]):
+                if attempt < max_retries - 1:
+                    delay = base_delay * (3 ** attempt) + random.uniform(1, 5)
+                    time.sleep(delay)
+                    continue
+                raise Exception(f"keyword_persona API: network error after retries")
+            else:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+                    print(f"⚠️ [keyword_persona] Error ({e}), retrying in {delay:.1f}s")
+                    time.sleep(delay)
+                    continue
+                raise Exception(f"keyword_persona API: {e}")
+
+    return summary  # final fallback
+
+
 def _load_single_user_data(input_address, output_address, LaMP_type, counter):
 
     # ========== 处理UltraChat/WildChat/PrefEval数据集 ==========
@@ -535,7 +805,7 @@ def _load_single_multiturn_data(input_address, LaMP_type, counter):
     else:
         dataset_name = "prefeval"
 
-    from IDS_TAP_parameters.py import NEW_DATASET_CONFIG
+    from IDS_TAP_parameters import NEW_DATASET_CONFIG
     dataset_config = NEW_DATASET_CONFIG.get(dataset_name, {})
     instruction = dataset_config.get('instruction', 'Predict the user\'s next query')
 
@@ -872,7 +1142,8 @@ def _split_profile_for_lamp(all_profiles):
     else:
 
         history_count = LAMP_HISTORY_CONTEXT_COUNT_LARGE
-        max_additional = LAMP_TOTAL_IO_COUNT - 1  
+        history_context = all_profiles[:history_count]
+        max_additional = LAMP_TOTAL_IO_COUNT - 1
         additional_profiles = all_profiles[history_count:history_count + max_additional]
 
     return history_context, additional_profiles
@@ -886,11 +1157,11 @@ def _rank_entries_by_relevance(query, entries, top_k=None, use_rag_api=True, api
     if top_k is None:
         top_k = len(entries)
 
-    if use_rag_api:
+    if use_rag_api and api_url:
         try:
             return _rank_entries_by_rag_api(query, entries, top_k, api_url)
         except Exception as e:
-            print(f"⚠️ ")
+            print(f"⚠️ RAG API failed, falling back to local model: {e}")
             # 回退到本地模型
 
 
@@ -937,7 +1208,7 @@ def _rank_entries_by_rag_api(query, entries, top_k, api_url, max_retries=3, retr
 
 
     payload = {
-        "model": "/workspace/users/zhiwei/qwen3",
+        "model": os.environ.get("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B"),
         "input": all_texts
     }
 
@@ -1367,7 +1638,7 @@ def Synthesis_dependent(query, history_context):
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
-            model="deepseek/deepseek-v3.2",   
+            model="deepseek/deepseek-v3.2",
             messages=[{"role": "system", "content": "You are an expert in text summarization."},
                         {"role": "user", "content": prompt}],
             temperature=0.4,
@@ -1567,7 +1838,7 @@ def get_rephrase(text, max_length=None, lamp_type=None):
 
 
             response = client.chat.completions.create(
-                model="deepseek/deepseek-v3.2",  
+                model="deepseek/deepseek-v3.2",
                 messages = [
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": user_content}
@@ -1854,7 +2125,7 @@ def get_rephrase_with_context(history_context, original_summary, previous_rephra
 
     raise Exception(f"Rephrase with context API")
 
-def domain_generation(instruction, summary, time, lamp_type=None, input_id=None, counter=None, history_context=None):
+def domain_generation(instruction, summary, time, lamp_type=None, input_id=None, counter=None, history_context=None, method="rephrase"):
 
     import os
     import json
@@ -1902,6 +2173,147 @@ def domain_generation(instruction, summary, time, lamp_type=None, input_id=None,
     filename = f"{dataset_prefix}_times{time}_{input_id}{counter_str}.json"
     filepath = os.path.join(storage_dir, filename)
 
+    # ===== KEYWORD EMPHASIS METHOD =====
+    if method == "keyword":
+        import itertools
+        import random as _random
+
+        from IDS_TAP_parameters import DATA_CONFIG as _DC
+        n_kw_min     = _DC.get("keyword_n_keywords_min", 10)
+        n_kw_max     = _DC.get("keyword_n_keywords_max", 15)
+        combo_sizes  = _DC.get("keyword_combo_sizes", [2, 3])
+        kw_seed      = _DC.get("keyword_random_seed", 62)
+
+        kw_storage_dir = "./rephase_data"
+        kw_log_dir     = "./keyword_logs"
+        os.makedirs(kw_storage_dir, exist_ok=True)
+        os.makedirs(kw_log_dir, exist_ok=True)
+
+        kw_filename  = f"{dataset_prefix}_times{time}_{input_id}{counter_str}.json"
+        kw_filepath  = os.path.join(kw_storage_dir, kw_filename)
+
+        # ---- Load cached results if complete ----
+        allVersions_summary = []
+        assigned_combos     = []
+        keywords_extracted  = []
+
+        if os.path.exists(kw_filepath):
+            try:
+                with open(kw_filepath, 'r', encoding='utf-8') as _f:
+                    _cached = json.load(_f)
+                # Only reuse cache if it was generated by the keyword method
+                if _cached.get('generation_method') != 'keyword_emphasis':
+                    print(f"⚠️ [keyword] Cache file exists but was generated by a different method "
+                          f"({_cached.get('generation_method', 'unknown')}), starting fresh")
+                else:
+                    _cached_summaries = _cached.get('summaries', [])
+                    if (len(_cached_summaries) == time and
+                            all(s and isinstance(s, str) and s.strip() for s in _cached_summaries)):
+                        print(f"✅ [keyword] Loaded {time} cached keyword-emphasis summaries from {kw_filepath}")
+                        return single_instruction, _cached_summaries
+                    else:
+                        # Partial cache — resume from it
+                        allVersions_summary = _cached_summaries
+                        assigned_combos     = _cached.get('assigned_combos', [])
+                        keywords_extracted  = _cached.get('keywords', [])
+                        print(f"📂 [keyword] Resuming from {len(allVersions_summary)}/{time}")
+            except Exception as _e:
+                print(f"⚠️ [keyword] Cache read error: {_e}, starting fresh")
+
+        # ---- Extract keywords if not yet available ----
+        if not keywords_extracted:
+            if history_context is not None:
+                keywords_extracted = extract_keywords_from_context(
+                    history_context, lamp_type,
+                    n_keywords_min=n_kw_min, n_keywords_max=n_kw_max
+                )
+            else:
+                print("⚠️ [keyword] No history_context provided, falling back to rephrase")
+                method = "rephrase"
+
+        if method == "keyword" and len(keywords_extracted) < 3:
+            print(f"⚠️ [keyword] Too few keywords ({len(keywords_extracted)}), falling back to rephrase")
+            method = "rephrase"
+
+        if method == "keyword":
+            # ---- Build combination pool ----
+            all_combos = []
+            for _sz in combo_sizes:
+                if len(keywords_extracted) >= _sz:
+                    all_combos.extend([list(c) for c in itertools.combinations(keywords_extracted, _sz)])
+
+            _random.seed(kw_seed)
+            _random.shuffle(all_combos)
+
+            # ---- Assign combos (cycle to fill `time` arms) ----
+            if not assigned_combos:
+                assigned_combos = [all_combos[i % len(all_combos)] for i in range(time)]
+
+                # Save keyword log file (created once, records all assigned combos)
+                kw_log_filename = f"{dataset_prefix}_{input_id}{counter_str}_keywords.json"
+                kw_log_filepath = os.path.join(kw_log_dir, kw_log_filename)
+                _log_data = {
+                    "input_id":           input_id,
+                    "counter":            counter,
+                    "lamp_type":          lamp_type,
+                    "dataset_prefix":     dataset_prefix,
+                    "keywords":           keywords_extracted,
+                    "n_keywords":         len(keywords_extracted),
+                    "combo_sizes":        combo_sizes,
+                    "total_unique_combos": len(all_combos),
+                    "assigned_combos":    assigned_combos,
+                    "random_seed":        kw_seed,
+                    "created_at":         datetime.now().isoformat(),
+                }
+                try:
+                    with open(kw_log_filepath, 'w', encoding='utf-8') as _lf:
+                        json.dump(_log_data, _lf, ensure_ascii=False, indent=2)
+                    print(f"   📋 [keyword] Keyword log saved: {kw_log_filepath}")
+                except Exception as _le:
+                    print(f"⚠️ [keyword] Failed to save keyword log: {_le}")
+
+            # ---- Generate personas for remaining arms ----
+            _ref_len    = len(allVersions_summary[0]) if allVersions_summary else len(summary)
+            _max_length = _ref_len * 2
+
+            current_count = len(allVersions_summary)
+            for i in range(current_count, time):
+                _combo = assigned_combos[i]
+                print(f"   🔑 [keyword] arm {i+1}/{time}, keywords: {_combo}")
+                try:
+                    _kw_persona = get_persona_with_keyword_emphasis(
+                        summary, history_context, _combo,
+                        max_length=_max_length, lamp_type=lamp_type
+                    )
+                    allVersions_summary.append(_kw_persona if _kw_persona else summary)
+                except Exception as _pe:
+                    print(f"   ❌ [keyword] arm {i+1} failed: {_pe}, using base summary")
+                    allVersions_summary.append(summary)
+
+                # Incremental save
+                _progress_data = {
+                    "instruction":       single_instruction,
+                    "original_summary":  summary,
+                    "summaries":         allVersions_summary,
+                    "keywords":          keywords_extracted,
+                    "assigned_combos":   assigned_combos,
+                    "lamp_type":         lamp_type,
+                    "times":             time,
+                    "input_id":          input_id,
+                    "counter":           counter,
+                    "generation_method": "keyword_emphasis",
+                    "created_at":        datetime.now().isoformat(),
+                    "current_progress":  len(allVersions_summary),
+                }
+                save_incremental_data(kw_filepath, _progress_data)
+                print(f"   💾 [keyword] {len(allVersions_summary)}/{time}")
+
+            while len(allVersions_summary) < time:
+                allVersions_summary.append(allVersions_summary[-1])
+
+            print(f"🎉 [keyword] Done: {len(allVersions_summary)} keyword-emphasis personas generated")
+            return single_instruction, allVersions_summary
+    # ===== END KEYWORD METHOD — fall through to rephrase if method changed to "rephrase" =====
 
     existing_files = []
     if os.path.exists(storage_dir):
@@ -2131,7 +2543,7 @@ def domain_generation(instruction, summary, time, lamp_type=None, input_id=None,
         current_count = 1
 
 
-    from IDS_TAP_parameters.py import DATA_CONFIG
+    from IDS_TAP_parameters import DATA_CONFIG
     reset_interval = DATA_CONFIG.get("rephrase_reset_interval", 40)
     reset_enabled = DATA_CONFIG.get("rephrase_reset_enabled", True)
 

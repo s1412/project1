@@ -5,10 +5,27 @@ import subprocess
 import multiprocessing
 from datetime import datetime
 
-LLM_AS_JUDGE = True
+# 脚本所在目录（FTPERSLLM/）及其父目录（数据文件所在位置）
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR   = os.path.dirname(SCRIPT_DIR)
+
+# ID_TAP.py 子进程使用 hw 环境的 Python（包含 torch/matplotlib 等依赖）
+# 调度脚本本身可在 base 环境运行，子进程仍使用 hw 环境
+WORKER_PYTHON = os.environ.get("WORKER_PYTHON", sys.executable)
+if not os.path.exists(WORKER_PYTHON):
+    WORKER_PYTHON = sys.executable  # 回退到当前 Python
+
+# 仅在算法子进程中注入 HTTP 代理（不用 SOCKS，避免 socksio 依赖）
+# 设为 None 则不注入代理
+PROXY_URL = "http://127.0.0.1:7890"
+
+LLM_AS_JUDGE = False
 
 RUN_POHF = True
-RUN_PERSONA_AGENT = False
+RUN_PERSONA_AGENT = True
+
+# PersonaAgent 脚本路径
+PERSONA_AGENT_SCRIPT = os.path.join(SCRIPT_DIR, "PersonaAgent", "test_time_alignment.py")
 
 
 def log_print(message, gpu_id=None):
@@ -20,11 +37,11 @@ def log_print(message, gpu_id=None):
     sys.stdout.flush()
 
 DATASET_COUNTER_CONFIG = {
-    4: 20,
-    5: 20,
-    8: 20,
-    9: 20,
-    10: 20,
+    4: 40,
+    5: 40,
+    8: 40,
+    9: 40,
+    10: 40,
     0: 40,
     -1: 40,
     -2: 40,
@@ -77,50 +94,56 @@ PERSONA_AGENT_PAIR_WORKERS_CONFIG = {
 PERSONA_AGENT_BATCH_SIZE = 3
 PERSONA_AGENT_NUM_ITERATIONS = 1
 
+# PersonaAgent 数据集名称映射（与 test_time_alignment.py 保持一致）
+PERSONA_AGENT_DATASET_NAMES = {
+    4: "lamp4", 5: "lamp5", 8: "lamp8", 9: "lamp9", 10: "lamp10",
+    0: "ultrachat", -1: "wildchat", -2: "prefeval",
+}
+
 DATASET_SPECIFIC_COUNTERS = {
 }
 
 def get_dataset_config(lamp_type):
-    base_path = './APOHF-main'
+    base_path = os.path.join(BASE_DIR, 'APOHF-main')
 
     configs = {
         4: {
-            "input_address": f"{base_path}/time/LaMP_4/train/train_questions.json",
-            "output_address": f"{base_path}/time/LaMP_4/train/train_outputs.json",
+            "input_address": os.path.join(base_path, "time/LaMP_4/train/train_questions.json"),
+            "output_address": os.path.join(base_path, "time/LaMP_4/train/train_outputs.json"),
             "LaMP_type": 4,
         },
         5: {
-            "input_address": f"{base_path}/time/LaMP_5/train/train_questions.json",
-            "output_address": f"{base_path}/time/LaMP_5/train/train_outputs.json",
+            "input_address": os.path.join(base_path, "time/LaMP_5/train/train_questions.json"),
+            "output_address": os.path.join(base_path, "time/LaMP_5/train/train_outputs.json"),
             "LaMP_type": 5,
         },
         8: {
-            "input_address": f"{base_path}/longLaMP/abstract_generation/temporal_train.json",
+            "input_address": os.path.join(base_path, "longLaMP/abstract_generation/temporal_train.json"),
             "output_address": None,
             "LaMP_type": 8,
         },
         9: {
-            "input_address": f"{base_path}/longLaMP/product_review/temporal_train.json",
+            "input_address": os.path.join(base_path, "longLaMP/product_review/temporal_train.json"),
             "output_address": None,
             "LaMP_type": 9,
         },
         10: {
-            "input_address": f"{base_path}/longLaMP/topic_writing/temporal_train.json",
+            "input_address": os.path.join(base_path, "longLaMP/topic_writing/temporal_train.json"),
             "output_address": None,
             "LaMP_type": 10,
         },
         0: {
-            "input_address": "./ultrachat_multiturn/ultrachat_long_dialogues_with_response.json",
+            "input_address": os.path.join(BASE_DIR, "ultrachat_multiturn/ultrachat_long_dialogues_with_response.json"),
             "output_address": None,
             "LaMP_type": 0,
         },
         -1: {
-            "input_address": "./wildchat/wildchat_long_dialogues_with_response.json",
+            "input_address": os.path.join(BASE_DIR, "wildchat/wildchat_long_dialogues_with_response.json"),
             "output_address": None,
             "LaMP_type": -1,
         },
         -2: {
-            "input_address": "./PrefEval_dataset/PrefEval_persona.json",
+            "input_address": os.path.join(BASE_DIR, "PrefEval_dataset/PrefEval_persona.json"),
             "output_address": None,
             "LaMP_type": -2,
         }
@@ -161,6 +184,14 @@ def run_dataset_on_gpu(lamp_type, dataset_name, gpu_id, log_dir):
         log_print(f"  counter_array_length = {counter_array_length}, parallel_counters = {parallel_counters}", gpu_id)
 
         env = os.environ.copy()
+        # 仅注入 HTTP 代理，清除 SOCKS 代理（hw 环境无 socksio）
+        if PROXY_URL:
+            env['http_proxy'] = PROXY_URL
+            env['https_proxy'] = PROXY_URL
+            env['HTTP_PROXY'] = PROXY_URL
+            env['HTTPS_PROXY'] = PROXY_URL
+        env.pop('ALL_PROXY', None)
+        env.pop('all_proxy', None)
         env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
         env['POHF_LAMP_TYPE'] = str(lamp_type)
@@ -177,8 +208,8 @@ def run_dataset_on_gpu(lamp_type, dataset_name, gpu_id, log_dir):
 
         with open(log_file, 'w') as f:
             process = subprocess.Popen(
-                [sys.executable, '-u', 'IDS_TAP.py'],
-                cwd='',
+                [WORKER_PYTHON, '-u', 'ID_TAP.py'],
+                cwd=SCRIPT_DIR,
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 env=env,
@@ -218,7 +249,7 @@ def run_datasets_on_gpu_sequential(datasets, gpu_id, log_dir):
 def generate_counter_array_for_dataset(lamp_type, counter_array_length):
     import random as random_module
 
-    from IDS_TAP_parameters.py import DATA_CONFIG
+    from IDS_TAP_parameters import DATA_CONFIG
     random_seed = DATA_CONFIG.get("counter_random_seed", 62)
 
     config = get_dataset_config(lamp_type)
@@ -228,7 +259,7 @@ def generate_counter_array_for_dataset(lamp_type, counter_array_length):
 
     input_address = config.get('input_address', '')
 
-    from IDS_TAP_parameters.py import get_dataset_size_from_file
+    from IDS_TAP_parameters import get_dataset_size_from_file
     max_dataset_size = get_dataset_size_from_file(input_address, lamp_type)
 
     random_module.seed(random_seed)
@@ -259,196 +290,99 @@ def run_single_counter_subprocess(args):
         return (counter, -2, f"Counter {counter} exception: {str(e)}")
 
 def run_persona_agent_on_dataset(lamp_type, dataset_name, gpu_id, log_dir):
-    from concurrent.futures import ProcessPoolExecutor, as_Completed
+    """Run PersonaAgent for a dataset using the same random counter array as IDS_TAP."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    log_print(f"🤖 Starting PersonaAgent: {dataset_name}", gpu_id)
+    log_print(f"Starting PersonaAgent for {dataset_name}", gpu_id)
 
-    log_name = get_dataset_log_name(lamp_type)
-    log_file = os.path.join(log_dir, f"{log_name}_personaagent_gpu{gpu_id}.log")
+    counter_array_length = DATASET_COUNTER_CONFIG.get(lamp_type, 40)
+    parallel_counters = PERSONA_AGENT_PARALLEL_COUNTERS_CONFIG.get(lamp_type, 8)
+    batch_size = PERSONA_AGENT_BATCH_SIZE
+    num_iterations = PERSONA_AGENT_NUM_ITERATIONS
+    dataset_name_str = PERSONA_AGENT_DATASET_NAMES.get(lamp_type, "lamp4")
+    persona_dir = os.path.dirname(PERSONA_AGENT_SCRIPT)
 
-    start_time = time.time()
-
-    try:
-        counter_array_length = DATASET_COUNTER_CONFIG.get(lamp_type, 40)
-
-        counter_array = generate_counter_array_for_dataset(lamp_type, counter_array_length)
-        log_print(f"  PersonaAgent Usingrandom counter array: {len(counter_array)} items", gpu_id)
-
-        parallel_counters = PERSONA_AGENT_PARALLEL_COUNTERS_CONFIG.get(lamp_type, 3)
-        parallel_pairs = PERSONA_AGENT_PARALLEL_PAIRS_CONFIG.get(lamp_type, False)
-        pair_workers = PERSONA_AGENT_PAIR_WORKERS_CONFIG.get(lamp_type, 5)
-
-        log_print(f"  PersonaAgent configuration: parallel_counters={parallel_counters}, parallel_pairs={parallel_pairs}, pair_workers={pair_workers}", gpu_id)
-        log_print(f"  PersonaAgent algorithm params: batch_size={PERSONA_AGENT_BATCH_SIZE}, iterations={PERSONA_AGENT_NUM_ITERATIONS}", gpu_id)
-
-        env = os.environ.copy()
-        env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-
-        persona_agent_script = ''
-        cwd = ''
-
-        all_tasks = []
-        for counter in counter_array:
-            cmd_args = [
-                sys.executable, '-u', persona_agent_script,
-                '--dataset', log_name,
-                '--counter', str(counter),
-                '--batch_size', str(PERSONA_AGENT_BATCH_SIZE),
-                '--iterations', str(PERSONA_AGENT_NUM_ITERATIONS),
-                '--quiet'
-            ]
-
-            if parallel_pairs:
-                cmd_args.extend(['--parallel', '--workers', str(pair_workers)])
-
-            if LLM_AS_JUDGE:
-                cmd_args.append('--llm-as-judge')
-
-            all_tasks.append((counter, cmd_args, cwd, env))
-
-        with open(log_file, 'w') as f:
-            f.write(f"PersonaAgent configuration\n")
-            f.write(f"{'='*60}\n")
-            f.write(f"Random counter array: {counter_array}\n")
-            f.write(f"Total {len(counter_array)}  counters\n")
-            f.write(f"parallel_counters: {parallel_counters} (truly parallel)\n")
-            f.write(f"parallel_pairs: {parallel_pairs}\n")
-            f.write(f"pair_workers: {pair_workers}\n")
-            f.write(f"batch_size (k): {PERSONA_AGENT_BATCH_SIZE}\n")
-            f.write(f"iterations (E): {PERSONA_AGENT_NUM_ITERATIONS}\n")
-            f.write(f"{'='*60}\n\n")
-
-        log_print(f"  🚀 Starting {parallel_counters} items parallel process handling {len(counter_array)}  counters", gpu_id)
-
-        Completed_count = 0
-        failed_count = 0
-        results_log = []
-
-        with ProcessPoolExecutor(max_workers=parallel_counters) as executor:
-            future_to_counter = {
-                executor.submit(run_single_counter_subprocess, task): task[0]
-                for task in all_tasks
-            }
-
-            for future in as_Completed(future_to_counter):
-                counter = future_to_counter[future]
-                try:
-                    counter_id, return_code, output = future.result()
-                    Completed_count += 1
-
-                    if return_code == 0:
-                        status = "✅"
-                    else:
-                        status = "❌"
-                        failed_count += 1
-
-                    results_log.append((counter_id, return_code, output))
-
-                    if Completed_count % 5 == 0 or Completed_count == len(counter_array):
-                        log_print(f"  Progress: {Completed_count}/{len(counter_array)} (failed: {failed_count})", gpu_id)
-
-                except Exception as e:
-                    failed_count += 1
-                    Completed_count += 1
-                    results_log.append((counter, -3, f"Future exception: {str(e)}"))
-                    log_print(f"  ⚠️ Counter {counter} exception: {e}", gpu_id)
-
-        with open(log_file, 'a') as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"Execution results summary\n")
-            f.write(f"{'='*60}\n")
-            f.write(f"Completed: {Completed_count}, Failed: {failed_count}\n\n")
-
-            for counter_id, return_code, output in sorted(results_log, key=lambda x: x[0]):
-                status = "SUCCESS" if return_code == 0 else f"FAILED (code={return_code})"
-                f.write(f"\n--- Counter {counter_id}: {status} ---\n")
-                f.write(output[:5000] if len(output) > 5000 else output)
-                f.write("\n")
-
-        end_time = time.time()
-        duration = end_time - start_time
-
-        log_print(f"✅ PersonaAgent {dataset_name} Complete! duration: {duration/60:.1f}min, success: {Completed_count - failed_count}/{Completed_count}", gpu_id)
-        return True
-
-    except Exception as e:
-        import traceback
-        log_print(f"❌ PersonaAgent {dataset_name} exception: {e}", gpu_id)
-        log_print(f"   Traceback: {traceback.format_exc()}", gpu_id)
-        return False
-
-def run_persona_agent_on_dataset_batch(lamp_type, dataset_name, gpu_id, log_dir):
-    log_print(f"🤖 Starting PersonaAgent (batch mode): {dataset_name}", gpu_id)
+    counter_array = generate_counter_array_for_dataset(lamp_type, counter_array_length)
 
     log_name = get_dataset_log_name(lamp_type)
-    log_file = os.path.join(log_dir, f"{log_name}_personaagent_batch_gpu{gpu_id}.log")
+    log_file = os.path.join(log_dir, f"{log_name}_persona_gpu{gpu_id}.log")
 
-    start_time = time.time()
+    env = os.environ.copy()
+    # 仅注入 HTTP 代理，清除 SOCKS 代理（hw 环境无 socksio）
+    if PROXY_URL:
+        env['http_proxy'] = PROXY_URL
+        env['https_proxy'] = PROXY_URL
+        env['HTTP_PROXY'] = PROXY_URL
+        env['HTTPS_PROXY'] = PROXY_URL
+    env.pop('ALL_PROXY', None)
+    env.pop('all_proxy', None)
+    env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
-    try:
-        counter_array_length = DATASET_COUNTER_CONFIG.get(lamp_type, 40)
+    # Build the common command prefix
+    base_cmd = [
+        WORKER_PYTHON, '-u', PERSONA_AGENT_SCRIPT,
+        '--dataset', dataset_name_str,
+        '--batch_size', str(batch_size),
+        '--iterations', str(num_iterations),
+        '--quiet',
+    ]
+    if LLM_AS_JUDGE:
+        base_cmd.append('--llm-as-judge')
 
-        parallel_counters = PERSONA_AGENT_PARALLEL_COUNTERS_CONFIG.get(lamp_type, 3)
-        parallel_pairs = PERSONA_AGENT_PARALLEL_PAIRS_CONFIG.get(lamp_type, False)
-        pair_workers = PERSONA_AGENT_PAIR_WORKERS_CONFIG.get(lamp_type, 5)
-
-        log_print(f"  PersonaAgent batch modeconfiguration: counter_end={counter_array_length}, parallel_counters={parallel_counters}", gpu_id)
-
-        env = os.environ.copy()
-        env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-
-        persona_agent_script = ''
-
-        cmd_args = [
-            sys.executable, '-u', persona_agent_script,
-            '--dataset', log_name,
-            '--counter-start', '0',
-            '--counter-end', str(counter_array_length),
-            '--parallel-counters', str(parallel_counters),
-            '--batch_size', str(PERSONA_AGENT_BATCH_SIZE),
-            '--iterations', str(PERSONA_AGENT_NUM_ITERATIONS),
-            '--quiet'
-        ]
-
-        if parallel_pairs:
-            cmd_args.extend(['--parallel', '--workers', str(pair_workers)])
-
-        if LLM_AS_JUDGE:
-            cmd_args.append('--llm-as-judge')
-
-        log_print(f"  Command: {' '.join(cmd_args)}", gpu_id)
-
-        with open(log_file, 'w') as f:
-            f.write(f"PersonaAgent batch mode\n")
-            f.write(f"Command: {' '.join(cmd_args)}\n")
-            f.write(f"{'='*60}\n\n")
-            f.flush()
-
-            process = subprocess.Popen(
-                cmd_args,
-                cwd='',
-                stdout=f,
-                stderr=subprocess.STDOUT,
+    def _run_single_counter(counter):
+        cmd = base_cmd + ['--counter', str(counter)]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=persona_dir,
                 env=env,
-                text=True
+                capture_output=True,
+                text=True,
+                timeout=18000
             )
-            return_code = process.wait()
+            return (counter, result.returncode, result.stdout + result.stderr)
+        except subprocess.TimeoutExpired:
+            return (counter, -1, f"Counter {counter} timeout after 5 hours\n")
+        except Exception as e:
+            return (counter, -2, f"Counter {counter} exception: {e}\n")
 
-        end_time = time.time()
-        duration = end_time - start_time
+    start_time = time.time()
+    success_count = 0
+    fail_count = 0
 
-        if return_code == 0:
-            log_print(f"✅ PersonaAgent {dataset_name} (batch mode) Complete! duration: {duration/60:.1f}min", gpu_id)
-            return True
-        else:
-            log_print(f"❌ PersonaAgent {dataset_name} (batch mode) failed! error code: {return_code}", gpu_id)
-            return False
+    with open(log_file, 'w') as f:
+        f.write(f"PersonaAgent {dataset_name} GPU{gpu_id} started\n")
+        f.write(f"Counter array ({len(counter_array)} items): {counter_array}\n\n")
 
+    try:
+        # Use ThreadPoolExecutor: each thread just launches an external subprocess (I/O-bound)
+        with ThreadPoolExecutor(max_workers=parallel_counters) as executor:
+            futures = {executor.submit(_run_single_counter, c): c for c in counter_array}
+            for future in as_completed(futures):
+                counter, rc, output = future.result()
+                with open(log_file, 'a') as f:
+                    f.write(f"\n=== Counter {counter} (rc={rc}) ===\n")
+                    f.write(output)
+                if rc == 0:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                log_print(
+                    f"  PersonaAgent counter {counter} done (rc={rc}), "
+                    f"progress: {success_count + fail_count}/{len(counter_array)}",
+                    gpu_id
+                )
     except Exception as e:
-        import traceback
-        log_print(f"❌ PersonaAgent {dataset_name} (batch mode) exception: {e}", gpu_id)
-        log_print(f"   Traceback: {traceback.format_exc()}", gpu_id)
+        log_print(f"PersonaAgent {dataset_name} exception: {e}", gpu_id)
         return False
+
+    duration = time.time() - start_time
+    log_print(
+        f"PersonaAgent {dataset_name} done: {success_count}/{len(counter_array)} success, "
+        f"{duration / 60:.1f}min",
+        gpu_id
+    )
+    return success_count == len(counter_array)
 
 def run_all_algorithms_on_gpu_sequential(datasets, gpu_id, log_dir):
     algorithms_to_run = []
@@ -469,7 +403,7 @@ def run_all_algorithms_on_gpu_sequential(datasets, gpu_id, log_dir):
             pohf_results.append((dataset_name, "IDS_TAP", success))
 
         pohf_success = sum(1 for _, _, success in pohf_results if success)
-        log_print(f"📊 GPU {gpu_id} IDS_TAP Complete: {pohf_success}/{len(datasets)} datasetssuccess", gpu_id)
+        log_print(f"📊 GPU {gpu_id} IDS_TAP Complete: {pohf_success}/{len(datasets)} datasets success", gpu_id)
 
     if RUN_PERSONA_AGENT:
         log_print(f"📍 GPU {gpu_id} Phase 2: Running PersonaAgent baseline", gpu_id)
@@ -478,17 +412,17 @@ def run_all_algorithms_on_gpu_sequential(datasets, gpu_id, log_dir):
             persona_results.append((dataset_name, "PersonaAgent", success))
 
         persona_success = sum(1 for _, _, success in persona_results if success)
-        log_print(f"📊 GPU {gpu_id} PersonaAgent Complete: {persona_success}/{len(datasets)} datasetssuccess", gpu_id)
+        log_print(f"📊 GPU {gpu_id} PersonaAgent Complete: {persona_success}/{len(datasets)} datasets success", gpu_id)
 
     all_results = pohf_results + persona_results
     total_success = sum(1 for _, _, success in all_results if success)
     total_tasks = len(all_results)
-    log_print(f"📊 GPU {gpu_id} All Complete: {total_success}/{total_tasks}  tasks success", gpu_id)
+    log_print(f"📊 GPU {gpu_id} All Complete: {total_success}/{total_tasks} tasks success", gpu_id)
 
     return all_results
 
 def main():
-    log_print("IDS_TAP + PersonaAgent Multi-GPU parallel execution script")
+    log_print("IDS_TAP Multi-GPU parallel execution script")
     log_print("=" * 80)
     log_print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log_print("")
@@ -501,34 +435,42 @@ def main():
     gpu_dataset_mapping_parallel = {
         1: [
             (4, "LongLaMP-4 (Product Rating)"),
-            (9, "LongLaMP-9 (Product Review)"),
+            # (5, "LongLaMP-5 (News Categorization)"),
+            # (9, "LongLaMP-9 (Product Review)"),
         ],
         2: [
-            (5, "LongLaMP-5 (News Categorization)"),
+            # (5, "LongLaMP-5 (News Categorization)"),
             (10, "LongLaMP-10 (Topic Writing)"),
         ],
         3: [
             (0, "UltraChat"),
             (-2, "Prefevel"),
-            (8, "LongLaMP-8 (Abstract Writing)"),
+            # (8, "LongLaMP-8 (Abstract Writing)"),
         ],
     }
 
+    algos = []
+    if RUN_POHF:
+        algos.append("IDS_TAP")
+    if RUN_PERSONA_AGENT:
+        algos.append("PersonaAgent")
+    algo_str = " + ".join(algos) if algos else "none"
+
     log_print("📋 Execution plan:")
     log_print("")
-    log_print("  🔄 GPU parallel execution（Each GPU runs sequentially IDS_TAP + PersonaAgent）:")
+    log_print(f"  🔄 GPU parallel execution (algorithms: {algo_str}):")
     for gpu_id, datasets in sorted(gpu_dataset_mapping_parallel.items()):
         dataset_names = " -> ".join([name for _, name in datasets])
         total_counters = sum(DATASET_COUNTER_CONFIG.get(lamp_type, 40) for lamp_type, _ in datasets)
         log_print(f"    GPU {gpu_id}: {dataset_names}")
-        log_print(f"           Total {len(datasets)} datasets, {total_counters}  counters")
-        log_print(f"           Execution order: IDS_TAP -> PersonaAgent")
+        log_print(f"           Total {len(datasets)} datasets, {total_counters} counters")
+        log_print(f"           Execution order: {algo_str}")
     log_print("")
 
     processes = []
     total_start_time = time.time()
 
-    log_print("🚀 Starting GPU tasks（POHF + PersonaAgent）...")
+    log_print(f"🚀 Starting GPU tasks (algorithms: {algo_str})...")
 
     for gpu_id, datasets in gpu_dataset_mapping_parallel.items():
         p = multiprocessing.Process(
@@ -537,7 +479,7 @@ def main():
         )
         p.start()
         processes.append((gpu_id, p))
-        log_print(f"  Started GPU {gpu_id} process (IDS_TAP + PersonaAgent)")
+        log_print(f"  Started GPU {gpu_id} process ({algo_str})")
         time.sleep(10)
 
     for gpu_id, p in processes:
@@ -550,14 +492,14 @@ def main():
         log_print("")
         log_print("📊 LLM_AS_JUDGE=False，Automatically generating ROUGE-L progress charts...")
         try:
-            plot_output_dir = "./rougeL_conter_progress_withPersonaAgent"
+            plot_output_dir = "./rougeL_conter_progress_IDS_TAP"
             os.makedirs(plot_output_dir, exist_ok=True)
             log_print(f"  📁 Output directory: {plot_output_dir}")
 
-            plot_script = "./plot_rougescore_progress.py"
+            plot_script = os.path.join(SCRIPT_DIR, "plot_rougescore_progress.py")
             plot_result = subprocess.run(
                 [sys.executable, plot_script],
-                cwd='',
+                cwd=SCRIPT_DIR,
                 capture_output=True,
                 text=True,
                 timeout=600
@@ -582,9 +524,9 @@ def main():
     for gpu_id, datasets in sorted(gpu_dataset_mapping_parallel.items()):
         dataset_info = " -> ".join([f"{name}" for _, name in datasets])
         log_print(f"    GPU {gpu_id}: {dataset_info}")
-        log_print(f"           algorithms: IDS_TAP + PersonaAgent")
+        log_print(f"           algorithms: {algo_str}")
     log_print("")
-    log_print("✅ All GPU runs Complete (IDS_TAP + PersonaAgent)!")
+    log_print(f"✅ All GPU runs Complete ({algo_str})!")
 
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn', force=True)

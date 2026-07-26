@@ -1,0 +1,70 @@
+# Credentials and local environment
+.env
+.env.*
+key
+credentials*
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Datasets, checkpoints, and serialized objects
+*.json
+*.jsonl
+*.arrow
+*.parquet
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+APOHF-main/
+PrefEval_dataset/
+ultrachat_multiturn/
+wildchat/
+rephase_data/
+rephase_data_400/
+
+# Generated experiment outputs
+*.log
+*.csv
+*.pdf
+*.tex
+*.latex
+*.aux
+*.out
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.docx
+*.DS_Store
+parallel_run_*/
+diff_judge/
+embeddings/
+final_re/
+final_su/
+keyword_logs/
+past_average/
+past_average_t=*/
+persona_results/
+plots/
+prefeval_output/
+rougeL_conter_progress_*/
+k=*/
+
+# Local utilities unrelated to the released implementation
+gen_speech_*.py
+scripts/renumber_refs.py
+
+# Keep only the repository-level usage guide among Markdown files
+*.md
+!/README.md

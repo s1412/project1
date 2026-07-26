@@ -1,5 +1,6 @@
 import numpy as np
 import logging
+from collections import deque
 from typing import Dict, List, Optional, Tuple, Set, Any
 import torch
 import time
@@ -101,11 +102,12 @@ class PairwiseInformationManager:
 
     def _get_connected_arms(self, arm: int) -> Set[int]:
         connected = set()
-        queue = [arm]
+        # 使用 deque 代替 list，popleft() 是 O(1)，list.pop(0) 是 O(N)
+        queue = deque([arm])
         visited = {arm}
 
         while queue:
-            current = queue.pop(0)
+            current = queue.popleft()
             for other in range(self.num_arms):
                 if other not in visited and self.total_counts[current, other] > 0:
                     visited.add(other)
@@ -309,11 +311,13 @@ class PairwiseInformationManager:
     def calculate_information_gain_optimized(self, champion: int, challenger: int,
                                               H_before: torch.Tensor = None,
                                               theta_current: torch.Tensor = None,
-                                              current_pi: torch.Tensor = None) -> float:
+                                              current_pi: torch.Tensor = None,
+                                              skip_sync: bool = False) -> float:
         if champion == challenger:
             return 0.0
 
-        self._sync_to_gpu()
+        if not skip_sync:
+            self._sync_to_gpu()
 
         if theta_current is None or current_pi is None:
             theta_current = self.estimate_bt_strengths_gpu()
@@ -364,13 +368,13 @@ class PairwiseInformationManager:
         if isolated_arms:
             representative = isolated_arms[0]
             isolated_gain = self.calculate_information_gain_optimized(
-                champion, representative, H_before, theta_current, current_pi)
+                champion, representative, H_before, theta_current, current_pi, skip_sync=True)
             for arm in isolated_arms:
                 information_gains[arm] = isolated_gain
 
         for challenger in connected_arms:
             gain = self.calculate_information_gain_optimized(
-                champion, challenger, H_before, theta_current, current_pi)
+                champion, challenger, H_before, theta_current, current_pi, skip_sync=True)
             information_gains[challenger] = gain
 
         return information_gains
@@ -574,7 +578,7 @@ class ContextualPairwiseInformationManager:
             ftpersllm_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'FTPERSLLM')
             if ftpersllm_path not in sys.path:
                 sys.path.insert(0, ftpersllm_path)
-            from IDS_TAP_parameters.py import CONTEXTUAL_BANDIT_CONFIG
+            from IDS_TAP_parameters import CONTEXTUAL_BANDIT_CONFIG
             self.sigmoid_steepness = CONTEXTUAL_BANDIT_CONFIG.get("sigmoid_steepness", 11.0)
             self.sigmoid_midpoint = CONTEXTUAL_BANDIT_CONFIG.get("sigmoid_midpoint", 0.5)
         except ImportError:

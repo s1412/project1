@@ -1,4 +1,5 @@
-10
+import os
+
 
 NETWORK_CONFIG = {
     "input_dim": None,  
@@ -74,7 +75,7 @@ POHF_CONFIG = {
 
 DATA_CONFIG = {
     "max_len": 100,
-    "times": 400,
+    "times": 100,  
 
     "counter_array_length": 40,
     "counter_random_seed": 62,
@@ -85,6 +86,13 @@ DATA_CONFIG = {
     "rephrase_reset_interval": 15,
     "rephrase_reset_enabled": True,
 
+    # Domain generation mode: "rephrase" (default) or "keyword"
+    "domain_generation_method": "rephase",
+    "keyword_n_keywords_min": 10,       # min keywords extracted when text is short (<500 words)
+    "keyword_n_keywords_max": 15,       # max keywords extracted when text is long (>1500 words)
+    "keyword_combo_sizes": [2, 3],      # combination sizes used to build arms
+    "keyword_random_seed": 62,          # fixed seed for combination shuffling
+
     "lamp_profile_threshold_small": 10,
     "lamp_profile_threshold_large": 20,
 
@@ -93,7 +101,7 @@ DATA_CONFIG = {
 
     "lamp_ranked_entries_output_count": 10,
 
-    "lamp_total_io_count":10,
+    "lamp_total_io_count":10, 
 }
 
 PARALLEL_CONFIG = {
@@ -112,7 +120,7 @@ EXPERIMENT_CONFIG = {
 CONTEXTUAL_BANDIT_CONFIG = {
     "enabled_for_lamp": True,  
 
-    "unified_training_rounds": 10, 
+    "unified_training_rounds": 10,
 
     "contextual_input_dim": 2048,      
     "standard_input_dim": 1024,         
@@ -200,10 +208,10 @@ BASELINE_CONFIG = {
 }
 
 API_CONFIG = {
-    "embedding_api_url": "YOUR_EMBEDDING_API_URL",
+    "embedding_api_url": "http://127.0.0.1:8400/v1/embeddings",
     "embedding_timeout": 30,
-    "openai_api_key": "YOUR_API_KEY_HERE",
-    "openai_base_url": "YOUR_OPENAI_BASE_URL",
+    "openai_api_key": os.environ.get("OPENROUTER_API_KEY"),
+    "openai_base_url": "https://openrouter.ai/api/v1",
     "openai_model": "deepseek/deepseek-v3.2",
     "openai_temperature": 0.0,  
 }
@@ -231,11 +239,31 @@ ROUGE_CONFIG = {
     "beta_min": 5.0,
     "beta_max": 100.0,
     "use_probabilistic": True,
-    "LLM_as_judge": True,
+    "LLM_as_judge": False,
+    # scoring_mode: "rouge" (default) or "bertscore"
+    "scoring_mode": "bertscore",
+}
+
+BERTSCORE_CONFIG = {
+    # Model used for BERTScore; roberta-large gives the best results
+    "model_type": "roberta-large",
+    # Device for BERTScore computation: "cuda:0", "cuda:1", "cpu", etc.
+    # Use cuda:0 because CUDA_VISIBLE_DEVICES remaps the assigned GPU to cuda:0
+    "device": "cuda:0",
+    # Number of texts per batch when computing BERTScore
+    "batch_size": 64,
+    # Language hint (used when model_type is None)
+    "lang": "en",
+    # Bradley-Terry beta parameters (same role as ROUGE_CONFIG a/b/beta_min/beta_max)
+    "a": 40,
+    "b": 0.001,
+    "beta_min": 5.0,
+    "beta_max": 100.0,
 }
 
 DEVICE_CONFIG = {
-    "device": "cuda:1",
+    # Use cuda:0 because CUDA_VISIBLE_DEVICES remaps the assigned GPU to cuda:0
+    "device": "cuda:0",
     "dtype": "float32",
     "cuda_launch_blocking": True,
     "clear_cache": True,
@@ -385,6 +413,10 @@ def get_all_configs():
     elif env_llm_as_judge in ('false', '0', 'no'):
         rouge_config['LLM_as_judge'] = False
 
+    env_scoring_mode = os.environ.get('POHF_SCORING_MODE', '').lower()
+    if env_scoring_mode in ('rouge', 'bertscore'):
+        rouge_config['scoring_mode'] = env_scoring_mode
+
     return {
         "network": NETWORK_CONFIG,
         "training": TRAINING_CONFIG,
@@ -395,6 +427,7 @@ def get_all_configs():
         "api": API_CONFIG,
         "llm": LLM_CONFIG,
         "rouge": rouge_config,
+        "bertscore": BERTSCORE_CONFIG,
         "device": DEVICE_CONFIG,
         "path": PATH_CONFIG,
         "output": OUTPUT_CONFIG,
