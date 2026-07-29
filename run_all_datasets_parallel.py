@@ -22,7 +22,7 @@ PROXY_URL = "http://127.0.0.1:7890"
 LLM_AS_JUDGE = False
 
 RUN_POHF = True
-RUN_PERSONA_AGENT = True
+RUN_PERSONA_AGENT = False
 
 # PersonaAgent 脚本路径
 PERSONA_AGENT_SCRIPT = os.path.join(SCRIPT_DIR, "PersonaAgent", "test_time_alignment.py")

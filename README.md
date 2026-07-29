@@ -1,6 +1,6 @@
 # IDS-TAP
 
-This repository contains the implementation of IDS-TAP for test-time personalized language-model generation. It includes the main preference-optimization pipeline, configuration, evaluation utilities, a local embedding service, PersonaAgent baselines, and analysis scripts.
+This repository contains the implementation of IDS-TAP for test-time personalized language-model generation. It includes the main preference-optimization pipeline, configuration, evaluation utilities, a local embedding service, and analysis scripts.
 
 No datasets, model checkpoints, API credentials, or generated experiment results are included.
 
